@@ -22,6 +22,7 @@ This guide provides step-by-step instructions for configuring a Hibiscus Sense E
 1. Log in to your Favoriot account.
 2. Navigate to **Edge Gateway** settings.
 3. Note the Gateway URL, Port, and MQTT Topic details.
+4. **Link:** `https://platform.favoriot.com/tutorial/v2/?python#edge-gateway`
 
 ---
 
@@ -42,71 +43,168 @@ This guide provides step-by-step instructions for configuring a Hibiscus Sense E
 
    ```cpp
    #include <WiFi.h>
-   #include <PubSubClient.h>
-
-   // Wi-Fi credentials
-   const char* ssid = "YOUR_WIFI_SSID";
-   const char* password = "YOUR_WIFI_PASSWORD";
-
-   // Favoriot Edge Gateway configurations
-   const char* mqtt_server = "YOUR_GATEWAY_URL";
-   const int mqtt_port = YOUR_GATEWAY_PORT;
-   const char* mqtt_topic = "YOUR_GATEWAY_TOPIC";
-
-   WiFiClient espClient;
-   PubSubClient client(espClient);
-
-   void setup() {
-       Serial.begin(115200);
-
-       // Connect to Wi-Fi
-       WiFi.begin(ssid, password);
-       while (WiFi.status() != WL_CONNECTED) {
-           delay(500);
-           Serial.print(".");
-       }
-       Serial.println("WiFi connected");
-
-       // Set MQTT server
-       client.setServer(mqtt_server, mqtt_port);
-
-       // Connect to MQTT broker
-       while (!client.connected()) {
-           if (client.connect("ESP32Client")) {
-               Serial.println("MQTT connected");
-           } else {
-               Serial.print("Failed, rc=");
-               Serial.print(client.state());
-               delay(2000);
-           }
-       }
+   #include <MQTT.h>
+   #include <WiFiClientSecure.h>
+   #include <Adafruit_APDS9960.h>
+   #include <Adafruit_BME280.h>
+   #include <Adafruit_MPU6050.h>
+   #include "FavoriotCA.h"
+   
+   // Initialize sensors
+   Adafruit_APDS9960 apds;
+   Adafruit_BME280 bme;
+   Adafruit_MPU6050 mpu;
+   sensors_event_t a, g, temp;
+   
+   // Wi-Fi and MQTT details
+   const char ssid[] = "YOUR_WIFI_SSID";
+   const char password[] = "YOUR_WIFI_PASSWORD";
+   const char GatewayDeveloperID[] = "YOUR_GATEWAY_DEVELOPER_ID";
+   const char GatewayAccessToken[] = "YOUR_GATEWAY_ACCESS_TOKEN";
+   const char publishTopic[] = "YOUR_MQTT_PUBLISH_TOPIC";
+   const char SubscribeTopic[] = "YOUR_MQTT_SUBSCRIBE_TOPIC";
+   
+   WiFiClientSecure wifiClient;
+   MQTTClient mqttClient(4096);  // Increase buffer size for larger payload
+   
+   unsigned long lastProximityMillis = 0;
+   unsigned long lastEnvironmentMillis = 0;
+   unsigned long lastMotionMillis = 0;
+   
+   void connectToWiFi() {
+     Serial.print("Connecting to Wi-Fi ");
+     WiFi.begin(ssid, password);
+     while (WiFi.status() != WL_CONNECTED) {
+       Serial.print(".");
+       delay(500);
+     }
+     Serial.println(" connected!");
    }
-
-   void loop() {
-       if (!client.connected()) {
-           // Reconnect if disconnected
-           while (!client.connected()) {
-               if (client.connect("ESP32Client")) {
-                   Serial.println("Reconnected to MQTT");
-               } else {
-                   delay(2000);
-               }
-           }
+   
+   void messageReceived(String &topic, String &payload) {
+     Serial.println("Incoming message on topic " + topic + ": " + payload);
+   }
+   
+   void connectToMQTT() {
+     while (!mqttClient.connected()) {
+       Serial.print("Connecting to MQTT...");
+       if (mqttClient.connect("ESP32Client", GatewayAccessToken, GatewayAccessToken)) {
+         Serial.println(" connected");
+         mqttClient.subscribe(String(SubscribeTopic));
+         Serial.println("Subscribed to status topic: " + String(SubscribeTopic));
+       } else {
+         Serial.print(" failed, status code: ");
+         Serial.println(mqttClient.lastError());
+         delay(2000);
        }
-
-       // Prepare sensor data (example temperature and humidity)
-       float temperature = 25.0; // Replace with actual sensor data
-       float humidity = 60.0;    // Replace with actual sensor data
-
-       String payload = "{";
-       payload += "\"temperature\": " + String(temperature) + ", ";
-       payload += "\"humidity\": " + String(humidity);
-       payload += "}";
-
-       // Publish data to Favoriot Edge Gateway
-       client.publish(mqtt_topic, payload.c_str());
-
-       delay(60000); // Send data every 60 seconds
+     }
+   }
+   
+   void setup() {
+     Serial.begin(115200);
+   
+     // Initialize sensors
+     if (!apds.begin()) {
+       Serial.println("Failed to find APDS9960 chip");
+     }
+     apds.enableProximity(true);
+   
+     if (!bme.begin()) {
+       Serial.println("Failed to find BME280 chip");
+     }
+   
+     if (!mpu.begin()) {
+       Serial.println("Failed to find MPU6050 chip");
+     }
+   
+     // Connect to Wi-Fi and MQTT
+     connectToWiFi();
+     wifiClient.setCACert(rootCACertificate);
+     mqttClient.begin("mqtt.favoriot.com", 8883, wifiClient);
+     mqttClient.onMessage(messageReceived);
+     connectToMQTT();
+   }
+   
+   void loop() {
+     if (WiFi.status() != WL_CONNECTED) {
+       connectToWiFi();
+     }
+   
+     if (!mqttClient.connected()) {
+       connectToMQTT();
+     }
+   
+     mqttClient.loop();
+   
+     unsigned long currentMillis = millis();
+   
+     // Proximity sensor data every 5 seconds
+     if (currentMillis - lastProximityMillis >= 5000) {
+       lastProximityMillis = currentMillis;
+   
+       int proximity = apds.readProximity();
+       String payload = "{\"uid\":\"" + String("apds1234") + "\",\"data\":{\"proximity\":\"" + String(proximity) + "\"}}";
+   
+       Serial.println("\nSending Proximity data...");
+       Serial.println("Data to Publish: " + payload);
+   
+       if (mqttClient.publish(String(publishTopic), payload)) {
+         Serial.println("Proximity data sent successfully");
+       } else {
+         Serial.println("Failed to send Proximity data");
+       }
+     }
+   
+     // Environmental sensor data every 5 seconds
+     if (currentMillis - lastEnvironmentMillis >= 5000) {
+       lastEnvironmentMillis = currentMillis;
+   
+       float humidity = bme.readHumidity();
+       float temperature = bme.readTemperature();
+       float pressure = bme.readPressure() / 100.0;
+       float altitude = bme.readAltitude(1013.25);
+   
+       String payload = "{\"uid\":\"" + String("bme1234") + "\",\"data\":{";
+       payload += "\"humidity\":\"" + String(humidity) + "\",";
+       payload += "\"temperature\":\"" + String(temperature) + "\",";
+       payload += "\"pressure\":\"" + String(pressure) + "\",";
+       payload += "\"altitude\":\"" + String(altitude) + "\"}}";
+   
+       Serial.println("\nSending Environmental data...");
+       Serial.println("Data to Publish: " + payload);
+   
+       if (mqttClient.publish(String(publishTopic), payload)) {
+         Serial.println("Environmental data sent successfully");
+       } else {
+         Serial.println("Failed to send Environmental data");
+       }
+     }
+   
+     // Motion sensor data every 5 seconds
+     if (currentMillis - lastMotionMillis >= 5000) {
+       lastMotionMillis = currentMillis;
+   
+       mpu.getEvent(&a, &g, &temp);
+   
+       String payload = "{\"uid\":\"" + String("mpu1234") + "\",\"data\":{";
+       payload += "\"acceleration_x\":\"" + String(a.acceleration.x) + "\",";
+       payload += "\"acceleration_y\":\"" + String(a.acceleration.y) + "\",";
+       payload += "\"acceleration_z\":\"" + String(a.acceleration.z) + "\",";
+       payload += "\"gyro_x\":\"" + String(g.gyro.x) + "\",";
+       payload += "\"gyro_y\":\"" + String(g.gyro.y) + "\",";
+       payload += "\"gyro_z\":\"" + String(g.gyro.z) + "\"}}";
+   
+       Serial.println("\nSending Motion data...");
+       Serial.println("Data to Publish: " + payload);
+   
+       if (mqttClient.publish(String(publishTopic), payload)) {
+         Serial.println("Motion data sent successfully");
+       } else {
+         Serial.println("Failed to send Motion data");
+       }
+     }
+   
+     delay(100);  // Small delay for loop stability
    }
    ```
 
@@ -128,6 +226,14 @@ This guide provides step-by-step instructions for configuring a Hibiscus Sense E
 1. Log in to your Favoriot account.
 2. Navigate to the **Edge Gateway Logs**.
 3. Verify that data from the Hibiscus Sense ESP32 is being received and logged.
+
+
+<p align="center"><img src="https://github.com/user-attachments/assets/86964cc6-dd9d-47f8-a5bd-cb974b9153a3" width="990"></a></p>
+
+
+<p align="center"><img src="https://github.com/user-attachments/assets/97d8c4c7-f336-4623-9462-0da928444ea5" width="990"></a></p>
+
+   
 
 ---
 
